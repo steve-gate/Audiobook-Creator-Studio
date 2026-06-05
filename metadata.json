@@ -1,0 +1,6 @@
+{
+  "name": "Audiobook Creator Studio",
+  "description": "An elegant application and helper for Google AI Studio Speech, enabling users to convert books, documents, and articles into professional structured audiobooks with smart segmenting and natural narration voices.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

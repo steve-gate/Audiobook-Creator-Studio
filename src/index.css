@@ -1,0 +1,38 @@
+@import "tailwindcss";
+
+@theme {
+  --font-serif: "Lora", Georgia, serif;
+  --font-sans: "Plus Jakarta Sans", sans-serif;
+  --color-natural-bg: #FDFCFB;
+  --color-natural-panel: #FAF9F7;
+  --color-natural-border: #E8E4DF;
+  --color-natural-accent: #A69076;
+  --color-natural-dark: #3D3D3D;
+  --color-natural-sage: #5A5A40;
+}
+
+body {
+  font-family: "Plus Jakarta Sans", sans-serif;
+  background-color: #FDFCFB;
+  color: #3D3D3D;
+}
+
+/* Custom premium scrollbar for sidebar lists and preview frames */
+.custom-scrollbar::-webkit-scrollbar {
+  width: 5px;
+  height: 5px;
+}
+
+.custom-scrollbar::-webkit-scrollbar-track {
+  background: #FAF9F7;
+  border-radius: 99px;
+}
+
+.custom-scrollbar::-webkit-scrollbar-thumb {
+  background: #E8E4DF;
+  border-radius: 99px;
+}
+
+.custom-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: #A69076;
+}
