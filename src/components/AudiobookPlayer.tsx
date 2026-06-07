@@ -26,14 +26,79 @@ export default function AudiobookPlayer({
   const [isAudioLoading, setIsAudioLoading] = useState(false);
 
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const utteranceRef = useRef<SpeechSynthesisUtterance | null>(null);
 
-  // Synchronize audio element when chapter or its audioUrl changes
-  useEffect(() => {
-    if (audioRef.current) {
-      audioRef.current.pause();
+  const hasAudio = !!chapter?.audioUrl;
+  const isBrowserSpeechMode = !!chapter && chapter.status === 'completed' && !hasAudio;
+
+  // Estimate duration for local SpeechSynthesis based on text length (approx 12.5 chars per sec)
+  const estimatedDuration = chapter ? Math.max(10, Math.floor(chapter.content.length / 12.5)) : 0;
+
+  // Function to initialize and speak using SpeechSynthesis starting from specific character index
+  const startSpeechSynthesisPlay = (startCharOffset: number = 0) => {
+    if (!chapter) return;
+    window.speechSynthesis.cancel();
+
+    const fullText = chapter.content;
+    const speakText = fullText.substring(startCharOffset).trim();
+    if (!speakText) {
+      setIsPlaying(false);
+      return;
+    }
+
+    const utterance = new SpeechSynthesisUtterance(speakText);
+    utteranceRef.current = utterance;
+
+    // Apply speed mapping
+    utterance.rate = speed;
+    utterance.volume = volume;
+    utterance.lang = 'vi-VN';
+
+    const voices = window.speechSynthesis.getVoices();
+    const viVoice = voices.find(v => v.lang.includes('vi') || v.lang.includes('VI'));
+    if (viVoice) {
+      utterance.voice = viVoice;
+    }
+
+    // Dynamic progression tracking using characters spoken
+    utterance.onboundary = (event) => {
+      if (event.name === 'word') {
+        const actualCharIndex = startCharOffset + event.charIndex;
+        const ratio = actualCharIndex / fullText.length;
+        setCurrentTime(ratio * estimatedDuration);
+      }
+    };
+
+    utterance.onend = () => {
       setIsPlaying(false);
       setCurrentTime(0);
+      utteranceRef.current = null;
+      if (onNextChapter) {
+        onNextChapter();
+      }
+    };
+
+    utterance.onerror = (e) => {
+      if (e.error !== 'interrupted') {
+        setIsPlaying(false);
+        utteranceRef.current = null;
+      }
+    };
+
+    window.speechSynthesis.speak(utterance);
+    setIsPlaying(true);
+  };
+
+  // Synchronize audio element / speech synthesis when chapter changes
+  useEffect(() => {
+    // Reset all playback devices
+    window.speechSynthesis.cancel();
+    if (audioRef.current) {
+      audioRef.current.pause();
+      audioRef.current = null;
     }
+    setIsPlaying(false);
+    setCurrentTime(0);
 
     if (chapter?.audioUrl) {
       setIsAudioLoading(true);
@@ -55,64 +120,103 @@ export default function AudiobookPlayer({
       audio.onended = () => {
         setIsPlaying(false);
         setCurrentTime(0);
-        if (onNextChapter) onNextChapter(); // Auto play next chapter in book
+        if (onNextChapter) onNextChapter();
       };
 
       audio.playbackRate = speed;
       audio.volume = volume;
 
-      // Autoplay if it just completed conversion
+      // Autoplay if completed
       if (chapter.status === 'completed') {
-        // Safe play
         audio.play().then(() => {
           setIsPlaying(true);
         }).catch(() => {
           setIsPlaying(false);
         });
       }
+    } else if (chapter?.status === 'completed') {
+      // Browser Speech Mode auto-play
+      setDuration(estimatedDuration);
+      // Wait momentarily for voices to load in background on some browsers
+      setTimeout(() => {
+        startSpeechSynthesisPlay(0);
+      }, 100);
     } else {
-      audioRef.current = null;
       setDuration(0);
-      setCurrentTime(0);
     }
 
     return () => {
       if (audioRef.current) {
         audioRef.current.pause();
       }
+      window.speechSynthesis.cancel();
     };
   }, [chapter?.audioUrl, chapter?.id]);
 
   // Handle Play/Pause
   const togglePlayPause = () => {
-    if (!audioRef.current) return;
-
-    if (isPlaying) {
-      audioRef.current.pause();
-      setIsPlaying(false);
+    if (isBrowserSpeechMode) {
+      if (isPlaying) {
+        window.speechSynthesis.cancel();
+        setIsPlaying(false);
+      } else {
+        const ratio = currentTime / estimatedDuration;
+        const targetCharOffset = Math.floor(ratio * (chapter?.content.length || 0));
+        startSpeechSynthesisPlay(targetCharOffset);
+      }
     } else {
-      audioRef.current.play().then(() => {
-        setIsPlaying(true);
-      }).catch((e) => {
-        console.error('Audio playback failed:', e);
-      });
+      if (!audioRef.current) return;
+
+      if (isPlaying) {
+        audioRef.current.pause();
+        setIsPlaying(false);
+      } else {
+        audioRef.current.play().then(() => {
+          setIsPlaying(true);
+        }).catch((e) => {
+          console.error('Audio playback failed:', e);
+        });
+      }
     }
   };
 
   // Seek bar implementation
   const handleSeekChange = (e: ChangeEvent<HTMLInputElement>) => {
     const time = parseFloat(e.target.value);
-    if (audioRef.current) {
-      audioRef.current.currentTime = time;
+    
+    if (isBrowserSpeechMode) {
       setCurrentTime(time);
+      const ratio = time / estimatedDuration;
+      const targetCharIdx = Math.floor(ratio * (chapter?.content.length || 0));
+      
+      if (isPlaying) {
+        startSpeechSynthesisPlay(targetCharIdx);
+      } else {
+        setCurrentTime(time);
+      }
+    } else {
+      if (audioRef.current) {
+        audioRef.current.currentTime = time;
+        setCurrentTime(time);
+      }
     }
   };
 
   // Speed adjustments
   const handleSpeedChange = (newSpeed: number) => {
     setSpeed(newSpeed);
-    if (audioRef.current) {
-      audioRef.current.playbackRate = newSpeed;
+    if (isBrowserSpeechMode) {
+      if (isPlaying) {
+        const ratio = currentTime / estimatedDuration;
+        const targetCharIdx = Math.floor(ratio * (chapter?.content.length || 0));
+        setTimeout(() => {
+          startSpeechSynthesisPlay(targetCharIdx);
+        }, 50);
+      }
+    } else {
+      if (audioRef.current) {
+        audioRef.current.playbackRate = newSpeed;
+      }
     }
   };
 
@@ -120,8 +224,14 @@ export default function AudiobookPlayer({
   const handleVolumeChange = (e: ChangeEvent<HTMLInputElement>) => {
     const val = parseFloat(e.target.value);
     setVolume(val);
-    if (audioRef.current) {
-      audioRef.current.volume = val;
+    if (isBrowserSpeechMode) {
+      if (utteranceRef.current) {
+        utteranceRef.current.volume = val;
+      }
+    } else {
+      if (audioRef.current) {
+        audioRef.current.volume = val;
+      }
     }
   };
 
@@ -140,7 +250,7 @@ export default function AudiobookPlayer({
     );
   }
 
-  const hasAudio = !!chapter.audioUrl;
+  const isPlayable = hasAudio || isBrowserSpeechMode;
 
   return (
     <div className="bg-white border border-[#E8E4DF] rounded-2xl p-5 shadow-md flex flex-col md:flex-row md:items-center justify-between gap-5 transition-all duration-300" id="audio-playback-deck">
@@ -159,14 +269,14 @@ export default function AudiobookPlayer({
             {chapter.title}
           </h4>
           <p className="text-xs text-[#8C8379] mt-0.5">
-            {hasAudio ? `Chất lượng cao • Ngắt câu tự nhiên` : `Chưa tạo tệp dữ liệu âm thanh`}
+            {hasAudio ? `Chất lượng cao • Ngắt câu tự nhiên` : isBrowserSpeechMode ? `Giọng đọc Máy • Offline Miễn phí` : `Chưa tạo tệp dữ liệu âm thanh`}
           </p>
         </div>
       </div>
 
       {/* Main Play Deck */}
       <div className="flex-1 max-w-xl flex flex-col items-center">
-        {hasAudio ? (
+        {isPlayable ? (
           <div className="w-full space-y-2">
             {/* Seekbar and timers */}
             <div className="flex items-center space-x-3 text-xs font-bold text-[#6B665F]">
@@ -243,7 +353,7 @@ export default function AudiobookPlayer({
       </div>
 
       {/* Speed, Volume & Download toolkit */}
-      {hasAudio && (
+      {isPlayable && (
         <div className="flex items-center justify-end space-x-4 min-w-max">
           {/* Speed settings */}
           <div className="flex items-center border border-[#E8E4DF] rounded-lg p-1 bg-[#FAF9F7]">
@@ -279,15 +389,25 @@ export default function AudiobookPlayer({
           </div>
 
           {/* Download button */}
-          <a
-            id="btn-download-wav-master"
-            href={chapter.audioUrl}
-            download={`${chapter.title.replace(/\s+/g, '_')}.wav`}
-            className="p-2.5 bg-[#FAF9F7] hover:bg-[#F0EEEB] text-[#5A5A40] border border-[#E8E4DF] rounded-xl transition-all shadow-xs flex items-center justify-center"
-            title="Tải tệp âm thanh WAV"
-          >
-            <Download className="h-4.5 w-4.5" />
-          </a>
+          {hasAudio ? (
+            <a
+              id="btn-download-wav-master"
+              href={chapter.audioUrl}
+              download={`${chapter.title.replace(/\s+/g, '_')}.wav`}
+              className="p-2.5 bg-[#FAF9F7] hover:bg-[#F0EEEB] text-[#5A5A40] border border-[#E8E4DF] rounded-xl transition-all shadow-xs flex items-center justify-center"
+              title="Tải tệp âm thanh WAV"
+            >
+              <Download className="h-4.5 w-4.5" />
+            </a>
+          ) : (
+            <button
+              disabled
+              className="p-2.5 bg-gray-50 text-gray-300 border border-gray-200 rounded-xl cursor-not-allowed"
+              title="Không hỗ trợ tải tệp với Giọng đọc Máy (Offline)"
+            >
+              <Download className="h-4.5 w-4.5" />
+            </button>
+          )}
         </div>
       )}
     </div>

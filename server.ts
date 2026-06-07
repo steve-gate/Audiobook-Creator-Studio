@@ -268,15 +268,19 @@ app.post("/api/ebook/parse", async (req: Request, res: Response): Promise<void> 
 
     // Ensure we have some text to parse at this stage
     if (!activeText || activeText.trim().length === 0) {
-      res.status(400).json({ error: "Không tìm thấy nội dung văn bản hợp lệ từ tệp hoặc đoạn văn dán vào. Vui lòng kiểm tra lại định dạng tệp." });
+      if (fileData) {
+        res.status(400).json({ error: "Không tìm thấy chữ trong tệp, hoặc định dạng tệp chưa được hỗ trợ (ví dụ: EPUB, DOCX lỗi). Vui lòng mở tệp trên máy của bạn, copy toàn bộ chữ rồi dán trực tiếp vào ô văn bản phía dưới để tạo sách nói dễ dàng nhất!" });
+      } else {
+        res.status(400).json({ error: "Không tìm thấy nội dung văn bản hợp lệ từ đoạn văn dán vào. Vui lòng kiểm tra lại." });
+      }
       return;
     }
 
     // Protect against out-of-token limit outputs (8192 tokens max is ~15k-20k words maximum output size of JSON)
-    // If the text length is very high (e.g. over 60,000 characters =~ 12,000 words), running a full restructuring
+    // If the text length is very high (e.g. over 15,000 characters), running a full restructuring
     // will hit output token limit truncation and result in empty text or JSON parsing errors.
     // Instead, immediately fall back to high-performance local regex segmenting.
-    if (activeText.length > 60000) {
+    if (activeText.length > 15000) {
       console.log(`[Parser] Tài liệu lớn (${activeText.length} kí tự) được chuyển thẳng qua hệ thống phân phân khúc regex nội bộ để tránh quá tải giới hạn token đầu ra của Gemini.`);
       
       // Attempt to extract title/author in a lightweight way
@@ -448,12 +452,14 @@ async function generateTtsChunk(
     instructionsList.push(`[Speaking Style & Tone: ${speakingStyle.trim()}]`);
   }
 
+  // Highly specific prompting to prevent truncation or summary of larger chunks
   if (instructionsList.length > 0) {
-    instructionText = `${instructionsList.join("\n")}\n\nPlease read the following text exactly using the specified style, character, and scene background:\n${textChunk}`;
+    instructionText = `${instructionsList.join("\n")}
+[CRITICAL INSTRUCTION: Read the following text aloud completely from start to end. Do not skip any word, do not summarize, do not paraphrase, and do not truncate or stop reading early. Every sentence must be spoken natively in the Vietnamese/original language.]
+${textChunk}`;
   } else {
-    // Add a visible spacer to instruct the model not to clip, or just pad with a space.
-    // We add a soft instruction to ensure it doesn't drop the first word.
-    instructionText = `Please read the following text aloud exactly as written:\n${textChunk}`;
+    instructionText = `[CRITICAL INSTRUCTION: Read the following text aloud exactly as written, completely from start to end. Do not skip any word, do not summarize, do not paraphrase, and do not truncate or stop reading early. Every sentence must be spoken natively in the Vietnamese/original language.]
+${textChunk}`;
   }
 
   const response = await ai.models.generateContent({
@@ -489,9 +495,9 @@ app.post("/api/ebook/tts", async (req: Request, res: Response): Promise<void> =>
 
     const ai = getAi();
 
-    // Dynamically split into small safe chunks to prevent cutting off or getting partial reads
-    const chunks = splitTextIntoTtsChunks(text, 700);
-    console.log(`[TTS] Đã tách cuốn sách/đoạn thành ${chunks.length} phần phụ để tránh tình trạng đọc dở dang (cắt trang).`);
+    // Dynamically split into comfortable visual chunks (up to 1800 characters) to reduce rate-limits
+    const chunks = splitTextIntoTtsChunks(text, 1800);
+    console.log(`[TTS] Đã tách cuốn sách/đoạn thành ${chunks.length} phần phụ (kích thước tối đa 1800 kí tự) để giảm thiểu rate limit 429.`);
 
     const pcmBuffers: Buffer[] = [];
     
@@ -500,10 +506,16 @@ app.post("/api/ebook/tts", async (req: Request, res: Response): Promise<void> =>
       let success = false;
       let lastError: any = null;
       let attempt = 0;
+      const maxAttempts = 5;
 
-      while (attempt < 3 && !success) {
+      while (attempt < maxAttempts && !success) {
         attempt++;
         try {
+          // Soft spacing delay between consecutive chunk requests to prevent hitting the RPM limit
+          if (i > 0 && attempt === 1) {
+            await new Promise(resolve => setTimeout(resolve, 1000));
+          }
+
           const chunkPcm = await generateTtsChunk(ai, chunks[i], voiceName, scene, sampleContext, speakingStyle);
           pcmBuffers.push(chunkPcm);
           success = true;
@@ -512,18 +524,25 @@ app.post("/api/ebook/tts", async (req: Request, res: Response): Promise<void> =>
           const errMsg = err.message || JSON.stringify(err);
           console.warn(`[TTS] Lỗi phần ${i + 1} lần ${attempt}:`, errMsg);
           
-          if (errMsg.includes("429") || errMsg.includes("exceeded") || errMsg.includes("quota")) {
-            throw new Error(`Bạn đã hết giới hạn tạo giọng đọc miễn phí (10 lượt/ngày của Gemini). Vui lòng cấu hình API Key riêng có trả phí trong mục Cài đặt hoặc thử lại vào ngày mai. Chi tiết: Quota Exceeded 429`);
-          }
-          
-          if (attempt < 3) {
-            await new Promise(resolve => setTimeout(resolve, 1500)); // Cool-off delay
+          if (attempt < maxAttempts) {
+            const isRateLimit = errMsg.includes("429") || 
+                                errMsg.includes("exceeded") || 
+                                errMsg.includes("quota") || 
+                                errMsg.toLowerCase().includes("too many requests") ||
+                                errMsg.toLowerCase().includes("limit");
+            const sleepMs = isRateLimit ? attempt * 3000 : 1500;
+            console.log(`[TTS] Đang gặp lỗi, chuẩn bị thử lại phần ${i + 1} sau ${sleepMs / 1000} giây...`);
+            await new Promise(resolve => setTimeout(resolve, sleepMs));
           }
         }
       }
 
       if (!success) {
-        throw new Error(`Thất bại tại phần đọc số ${i + 1}/${chunks.length} sau 3 lần thử: ${lastError?.message || lastError}`);
+        const lastErrMsg = lastError?.message || JSON.stringify(lastError);
+        if (lastErrMsg.includes("429") || lastErrMsg.includes("exceeded") || lastErrMsg.includes("quota") || lastErrMsg.toLowerCase().includes("too many requests") || lastErrMsg.toLowerCase().includes("limit")) {
+          throw new Error(`Giới hạn mẫu thử hoặc tần suất gọi giọng đọc Gemini quá tải (Lỗi 429). Vui lòng đợi vài giây rồi bấm thử lại, chia nhỏ chương hoặc tự cấu hình API Key cá nhân trong mục Cài đặt (bánh răng) ở góc trên để tạo Sách nói mượt mà không giới hạn!`);
+        }
+        throw new Error(`Thất bại tại phần đọc số ${i + 1}/${chunks.length} sau ${maxAttempts} lần thử: ${lastErrMsg}`);
       }
     }
 

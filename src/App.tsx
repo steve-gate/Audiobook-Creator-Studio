@@ -19,16 +19,44 @@ export default function App() {
   const [chapters, setChapters] = useState<Chapter[]>([]);
   
   // Settings matching AI Studio's Speech Generator Scene & Sample Context
-  const [selectedVoice, setSelectedVoice] = useState<'Kore' | 'Puck' | 'Charon' | 'Fenrir' | 'Zephyr'>('Kore');
+  const [selectedVoice, setSelectedVoice] = useState<'Kore' | 'Puck' | 'Charon' | 'Fenrir' | 'Zephyr' | 'BrowserSpeech'>('Kore');
   const [speakingStyle, setSpeakingStyle] = useState('natural calmly');
   const [scene, setScene] = useState('');
   const [sampleContext, setSampleContext] = useState('');
   const [activeChapterId, setActiveChapterId] = useState<string | null>(null);
+  const [confirmDialog, setConfirmDialog] = useState<{message: string, onConfirm: () => void} | null>(null);
+  const [alertDialog, setAlertDialog] = useState<string | null>(null);
   
   // UI Inputs
   const [pastedText, setPastedText] = useState('');
   const [isParsingBook, setIsParsingBook] = useState(false);
   const [isBatchProcessing, setIsBatchProcessing] = useState(false);
+  const [apiUsageToday, setApiUsageToday] = useState(0);
+
+  // Initialize and load usage from localStorage
+  useEffect(() => {
+    const today = new Date().toDateString();
+    const storedDate = localStorage.getItem('api_usage_date');
+    const storedCount = localStorage.getItem('api_usage_count');
+
+    if (storedDate === today) {
+      setApiUsageToday(parseInt(storedCount || '0', 10));
+    } else {
+      // New day, reset counter
+      localStorage.setItem('api_usage_date', today);
+      localStorage.setItem('api_usage_count', '0');
+      setApiUsageToday(0);
+    }
+  }, []);
+
+  // Update counter function
+  const incrementUsage = () => {
+    setApiUsageToday(prev => {
+      const newVal = prev + 1;
+      localStorage.setItem('api_usage_count', newVal.toString());
+      return newVal;
+    });
+  };
   const [isExporting, setIsExporting] = useState(false);
   const [parseError, setParseError] = useState<string | null>(null);
   const [dragActive, setDragActive] = useState(false);
@@ -148,26 +176,30 @@ export default function App() {
 
   // Clean local state /Reset project
   const resetProject = async () => {
-    if (confirm('Bạn có chắc chắn muốn xóa toàn bộ bản thảo hiện tại để bắt đầu mới?')) {
-      // Clean dynamic object URLs
-      chapters.forEach(ch => {
-        if (ch.audioUrl) {
-          URL.revokeObjectURL(ch.audioUrl);
-        }
-      });
-
-      setBookTitle('Bản Thảo Sách Nói Mới');
-      setAuthor('Tác giả Bạn Đọc');
-      setChapters([]);
-      setActiveChapterId(null);
-      setEditingChapter(null);
-      setPastedText('');
-      setParseError(null);
-      setScene('');
-      setSampleContext('');
-      localStorage.removeItem('audiobook_project');
-      await clearAllAudioBlobs();
-    }
+    setConfirmDialog({
+      message: 'Bạn có chắc chắn muốn xóa toàn bộ bản thảo hiện tại để bắt đầu mới?',
+      onConfirm: async () => {
+        // Clean dynamic object URLs
+        chapters.forEach(ch => {
+          if (ch.audioUrl) {
+            URL.revokeObjectURL(ch.audioUrl);
+          }
+        });
+  
+        setBookTitle('Bản Thảo Sách Nói Mới');
+        setAuthor('Tác giả Bạn Đọc');
+        setChapters([]);
+        setActiveChapterId(null);
+        setEditingChapter(null);
+        setPastedText('');
+        setParseError(null);
+        setScene('');
+        setSampleContext('');
+        localStorage.removeItem('audiobook_project');
+        await clearAllAudioBlobs();
+        setConfirmDialog(null);
+      }
+    });
   };
 
   // Drag and drop setup
@@ -358,6 +390,16 @@ export default function App() {
       const chapter = chapters.find(ch => ch.id === chapterId);
       if (!chapter) return false;
 
+      if (selectedVoice === 'BrowserSpeech') {
+        // Instant compilation for browser speech - no API call required
+        setChapters(prev => prev.map(ch => 
+          ch.id === chapterId 
+            ? { ...ch, status: 'completed', audioUrl: undefined } 
+            : ch
+        ));
+        return true;
+      }
+
       const response = await fetch('/api/ebook/tts', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -371,8 +413,23 @@ export default function App() {
       });
 
       if (!response.ok) {
-        const errorText = await response.json().catch(() => ({}));
-        throw new Error(errorText.error || 'Lỗi phản hồi giọng đọc.');
+        let errMsg = 'Lỗi phản hồi giọng đọc từ máy chủ.';
+        try {
+          const errorData = await response.json();
+          if (errorData && errorData.error) {
+            errMsg = errorData.error;
+          } else if (errorData && typeof errorData === 'string') {
+            errMsg = errorData;
+          }
+        } catch (jsonErr) {
+          try {
+            const rawText = await response.text();
+            if (rawText && rawText.trim().length > 0 && rawText.length < 500) {
+              errMsg = rawText.trim();
+            }
+          } catch (textErr) {}
+        }
+        throw new Error(errMsg);
       }
 
       const audioBlob = await response.blob();
@@ -392,13 +449,21 @@ export default function App() {
           ? { ...ch, status: 'completed', audioUrl: runtimeUrl } 
           : ch
       ));
+      incrementUsage();
       return true;
 
     } catch (err: any) {
       console.error(`TTS Error for chapter ${chapterId}:`, err);
+      let errorMsg = err.message || 'Lỗi nạp audio';
+      if (errorMsg.includes('429') || errorMsg.includes('quota') || errorMsg.includes('limit') || errorMsg.toLowerCase().includes('exhausted')) {
+        errorMsg = "Hạn mức server Google đã hết (10 lượt/ngày). Ứng dụng đã cập nhật trạng thái. Vui lòng chuyển sang 'Giọng đọc Máy (Browser)' để tiếp tục nghe miễn phí!";
+        // Sync local storage to match reality
+        setApiUsageToday(10);
+        localStorage.setItem('api_usage_count', '10');
+      }
       setChapters(prev => prev.map(ch => 
         ch.id === chapterId 
-          ? { ...ch, status: 'error', errorMessage: err.message || 'Lỗi nạp audio' } 
+          ? { ...ch, status: 'error', errorMessage: errorMsg } 
           : ch
       ));
       return false;
@@ -436,7 +501,7 @@ export default function App() {
     try {
       const completedChapters = chapters.filter(ch => ch.status === 'completed');
       if (completedChapters.length === 0) {
-        alert("Chưa có chương nào được tạo thành công âm thanh. Vui lòng tạo audio trước.");
+        setAlertDialog("Chưa có chương nào được tạo thành công âm thanh. Vui lòng tạo audio trước.");
         return;
       }
       
@@ -447,7 +512,7 @@ export default function App() {
       }
       
       if (blobs.length === 0) {
-        alert("Lỗi không tìm thấy file lưu trữ. Hãy thử tạo lại audio.");
+        setAlertDialog("Lỗi không tìm thấy file lưu trữ. Hãy thử tạo lại audio.");
         return;
       }
       
@@ -463,7 +528,7 @@ export default function App() {
       
       setTimeout(() => URL.revokeObjectURL(url), 5000);
     } catch (err: any) {
-      alert("Lỗi khi gộp file: " + err.message);
+      setAlertDialog("Lỗi khi gộp file: " + err.message);
     } finally {
       setIsExporting(false);
     }
@@ -510,17 +575,21 @@ export default function App() {
   };
 
   const handleDeleteChapter = async (id: string) => {
-    if (confirm('Bạn có muốn xóa vĩnh viễn chương này khỏi mục lục?')) {
-      const filtered = chapters.filter(ch => ch.id !== id);
-      setChapters(filtered);
-      
-      // Remove from browser IndexedDB to free space
-      await deleteAudioBlob(id);
-
-      if (activeChapterId === id) {
-        setActiveChapterId(filtered.length > 0 ? filtered[0].id : null);
+    setConfirmDialog({
+      message: 'Bạn có muốn xóa vĩnh viễn chương này khỏi mục lục?',
+      onConfirm: async () => {
+        const filtered = chapters.filter(ch => ch.id !== id);
+        setChapters(filtered);
+        
+        // Remove from browser IndexedDB to free space
+        await deleteAudioBlob(id);
+  
+        if (activeChapterId === id) {
+          setActiveChapterId(filtered.length > 0 ? filtered[0].id : null);
+        }
+        setConfirmDialog(null);
       }
-    }
+    });
   };
 
   // Quick navigation index helpers
@@ -813,6 +882,7 @@ export default function App() {
             onSceneChange={(val) => setScene(val)}
             sampleContext={sampleContext}
             onSampleContextChange={(val) => setSampleContext(val)}
+            apiUsageToday={apiUsageToday}
           />
 
           {/* Quick instructions widget & Auto-save / Token Info */}
@@ -892,6 +962,53 @@ export default function App() {
           </div>
         </footer>
       )}
+
+      {/* Global Alert Dialog */}
+      {alertDialog && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40 backdrop-blur-sm">
+          <div className="bg-white rounded-2xl shadow-xl max-w-sm w-full p-6 text-center border border-[#E8E4DF] animate-in fade-in zoom-in duration-200">
+            <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-full bg-rose-100 mb-4">
+              <AlertCircle className="h-6 w-6 text-rose-600" />
+            </div>
+            <h3 className="text-lg font-bold text-[#2D2D2D] mb-2 font-serif">Thông báo</h3>
+            <p className="text-sm text-[#6B665F] mb-6">{alertDialog}</p>
+            <button
+              onClick={() => setAlertDialog(null)}
+              className="w-full bg-[#5A5A40] text-white rounded-xl py-2.5 font-bold hover:bg-[#494932] transition-colors"
+            >
+              Đã hiểu
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Global Confirm Dialog */}
+      {confirmDialog && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40 backdrop-blur-sm">
+          <div className="bg-white rounded-2xl shadow-xl max-w-sm w-full p-6 text-center border border-[#E8E4DF] animate-in fade-in zoom-in duration-200">
+            <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-full bg-[#F0EEEB] mb-4">
+              <HelpCircle className="h-6 w-6 text-[#5A5A40]" />
+            </div>
+            <h3 className="text-lg font-bold text-[#2D2D2D] mb-2 font-serif">Xác nhận</h3>
+            <p className="text-sm text-[#6B665F] mb-6">{confirmDialog.message}</p>
+            <div className="flex space-x-3">
+              <button
+                onClick={() => setConfirmDialog(null)}
+                className="flex-1 bg-white border border-[#E8E4DF] text-[#6B665F] rounded-xl py-2.5 font-bold hover:bg-[#F9F8F6] transition-colors"
+              >
+                Hủy
+              </button>
+              <button
+                onClick={confirmDialog.onConfirm}
+                className="flex-1 bg-rose-600 text-white rounded-xl py-2.5 font-bold hover:bg-rose-700 transition-colors"
+              >
+                Xác nhận
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
     </div>
   );
 }

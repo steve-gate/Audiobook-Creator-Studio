@@ -16,19 +16,26 @@ export interface BookProject {
   author: string;
   createdAt: string;
   chapters: Chapter[];
-  voiceName: 'Kore' | 'Puck' | 'Charon' | 'Fenrir' | 'Zephyr';
+  voiceName: 'Kore' | 'Puck' | 'Charon' | 'Fenrir' | 'Zephyr' | 'BrowserSpeech';
   speakingStyle: string; // instruction prompt like: "narrative calmly", "energetically", etc.
 }
 
 export interface VoiceAudition {
-  voiceName: 'Kore' | 'Puck' | 'Charon' | 'Fenrir' | 'Zephyr';
+  voiceName: 'Kore' | 'Puck' | 'Charon' | 'Fenrir' | 'Zephyr' | 'BrowserSpeech';
   displayName: string;
-  gender: 'Female' | 'Male';
+  gender: 'Female' | 'Male' | 'Unisex';
   accent: string;
   vocalDescription: string;
 }
 
 export const PREBUILT_VOICES: VoiceAudition[] = [
+  {
+    voiceName: 'BrowserSpeech',
+    displayName: 'Giọng đọc Máy (Browser/Offline)',
+    gender: 'Unisex',
+    accent: 'Giọng đọc trình duyệt thiết bị (Không tốn Quota/Key)',
+    vocalDescription: 'Đọc bằng công nghệ Speech Synthesis của máy bạn. Chạy siêu tốc ngoại tuyến, hoàn toàn miễn phí, bấp chấp mọi giới hạn 429 và mạng yếu.'
+  },
   {
     voiceName: 'Kore',
     displayName: 'Kore (Thanh tao)',
